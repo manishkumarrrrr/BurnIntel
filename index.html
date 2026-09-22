@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BurnIntel — Burn-in Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="topbar"><div class="topinner">
+  <div class="brand">
+    <div class="brandmark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+        <rect x="10" y="10" width="12" height="12" rx="1"/>
+        <line x1="10" y1="14" x2="5" y2="14"/><line x1="10" y1="18" x2="5" y2="18"/>
+        <line x1="22" y1="14" x2="27" y2="14"/><line x1="22" y1="18" x2="27" y2="18"/>
+        <line x1="14" y1="10" x2="14" y2="5"/><line x1="18" y1="10" x2="18" y2="5"/>
+        <line x1="14" y1="22" x2="14" y2="27"/><line x1="18" y1="22" x2="18" y2="27"/>
+      </svg>
+    </div>
+    <div><div class="brandname">BurnIntel</div><div class="tagline">Burn-in Intelligence Platform</div></div>
+  </div>
+  <div class="header-right"><div class="stack"><span class="live-dot"></span><span>real ml pipeline</span></div><div id="modelBadge" class="badge">MODEL NOT TRAINED</div></div>
+</div></header>
+
+<main class="container">
+<section class="hero card">
+ <div class="hero-copy">
+  <span class="kicker">// component reliability, predictive screening</span>
+  <h1>Turn burn-in measurements into reliability decisions.</h1>
+  <p>Real XGBoost models, Isolation Forest anomaly detection and SHAP explanations, applied to component risk and 168-hour VDD drift.</p>
+  <div class="hero-pills"><span>Failure classification</span><span>168h drift prediction</span><span>Explainable AI</span></div>
+ </div>
+ <div class="hero-art">
+  <div class="readout">
+   <div class="readout-head">burn-in chamber · live status</div>
+   <div class="readout-row"><span>rows loaded</span><b id="heroRows">—</b></div>
+   <div class="readout-row"><span>model status</span><b id="heroStatus">Offline</b></div>
+   <div class="readout-row"><span>pipeline</span><b>xgb · isoforest</b></div>
+  </div>
+ </div>
+</section>
+
+<section class="grid two">
+ <div class="card workflow"><div class="step">01</div><h2>Load training dataset</h2><p class="muted">Upload labelled burn-in data. The supervised target is <b>cumulative_fail_flag</b>; leakage-prone future measurements are not used as classifier inputs.</p>
+  <form id="uploadForm"><input id="datasetFile" type="file" accept=".csv,.xls,.xlsx,.txt" required><button type="submit" class="primary">Upload dataset</button></form><div id="uploadResult" class="notice"></div>
+ </div>
+ <div class="card workflow"><div class="step">02</div><h2>Train the reliability models</h2><p class="muted">Train the real XGBoost classifier, XGBoost drift regressor and Isolation Forest. Holdout data remains untouched for evaluation.</p>
+  <button id="trainBtn" class="primary" disabled>Train final models</button><div id="trainResult" class="notice"></div>
+ </div>
+</section>
+
+<section class="section-title"><div><span class="kicker">// model lab</span><h2>Reliability performance</h2><p>Separate training and holdout metrics keep model performance transparent.</p></div></section>
+<section class="card">
+ <div class="section-head"><div><h3>Failure classification</h3><p class="muted">XGBoost probability model for cumulative failure risk.</p></div><span id="splitLabel" class="badge">80 / 20 HOLDOUT</span></div>
+ <div class="metric-grid" id="classificationMetrics"></div>
+ <div class="compare"><div><h3>Training set</h3><div id="trainClassMetrics" class="metric-grid compact"></div></div><div><h3>Holdout test</h3><div id="holdoutClassMetrics" class="metric-grid compact"></div></div></div>
+ <div class="chart-grid"><div class="chart-card"><div class="chart-head"><h3>Classification metrics</h3><span>holdout</span></div><canvas id="classChart"></canvas></div><div class="chart-card"><div class="chart-head"><h3>Confusion matrix</h3><span>holdout</span></div><div id="trainConfusion" class="confusionWrap"></div></div></div>
+ <h3 class="subhead">168-hour VDD drift regression</h3><div class="compare"><div><h3>Training set</h3><div id="trainDriftMetrics" class="metric-grid compact"></div></div><div><h3>Holdout test</h3><div id="holdoutDriftMetrics" class="metric-grid compact"></div></div></div>
+ <div class="chart-card wide"><div class="chart-head"><h3>Drift model quality</h3><span>MAE / RMSE / R²</span></div><canvas id="driftChart"></canvas></div>
+</section>
+
+<section class="section-title"><div><span class="kicker">// component intelligence</span><h2>Inspect any component</h2><p>Get the model decision, anomaly severity, 168-hour drift forecast and SHAP drivers in one view.</p></div></section>
+<section class="grid two">
+ <div class="card">
+  <div class="section-head"><div><h3>Training-set component</h3><p class="muted">Choose a component after training.</p></div><span class="icon-chip">⌁</span></div>
+  <div class="row"><select id="componentSelect" disabled><option>Select component</option></select><button id="predictBtn" class="primary" disabled>Analyze</button></div><div id="prediction"></div>
+ </div>
+ <div class="card">
+  <div class="section-head"><div><h3>Independent custom test</h3><p class="muted">Upload a separate labelled dataset without retraining.</p></div><span id="testBadge" class="badge">NO CUSTOM TEST</span></div>
+  <form id="testUploadForm"><input id="testFile" type="file" accept=".csv,.xls,.xlsx,.txt" required><button id="testUploadBtn" type="submit" class="secondary" disabled>Upload test</button></form>
+  <div class="row test-actions"><select id="testComponentSelect" disabled><option>Select test component</option></select><button id="evaluateBtn" type="button" class="primary" disabled>Evaluate all</button><button id="testPredictBtn" type="button" class="secondary" disabled>Analyze</button></div>
+  <div id="testUploadResult" class="notice"></div><div id="testMetrics"></div><div id="testPrediction"></div>
+  <a id="downloadTestBtn" class="button secondary hidden" href="/api/download-test-predictions">Download predictions</a>
+ </div>
+</section>
+
+<section class="grid two">
+ <div class="card">
+  <div class="section-head"><div><span class="kicker">// batch screening</span><h3>Run component batch</h3><p class="muted">Score all loaded training components with the trained pipeline.</p></div><span class="icon-chip">▦</span></div>
+  <button id="batchBtn" class="primary" disabled>Run batch analysis</button><a id="downloadBtn" class="button secondary hidden" href="/api/download-predictions">Download CSV</a><div id="batchResult"></div>
+  <div class="chart-card compact-chart"><canvas id="statusChart"></canvas></div>
+ </div>
+ <div class="card">
+  <div class="section-head"><div><span class="kicker">// decision engine</span><h3>How the signal is combined</h3></div></div>
+  <div class="signal-list"><div><span class="signal-dot risk"></span><b>Failure risk</b><small>XGBoost supervised probability drives PASS / WARNING / REJECT.</small></div><div><span class="signal-dot anomaly"></span><b>Anomaly severity</b><small>Isolation Forest is a separate diagnostic signal.</small></div><div><span class="signal-dot explain"></span><b>SHAP explanation</b><small>Top features show what pushed risk up or down.</small></div></div>
+ </div>
+</section>
+
+<section class="card component-panel"><div class="section-head"><div><span class="kicker">// explainability</span><h2>Decision details</h2><p class="muted">Detailed component evidence appears here after analysis.</p></div><span class="badge">SHAP</span></div><div id="details" class="empty">No component selected.</div></section>
+
+<section class="grid two"><div class="card"><h3>Training data preview</h3><div id="tableWrap" class="table-wrap empty">Upload training data to preview it here.</div></div><div class="card"><h3>Custom test preview</h3><div id="customTableWrap" class="table-wrap empty">Upload a custom test file to preview it here.</div></div></section>
+</main>
+<footer>BurnIntel · Burn-in reliability intelligence · Real XGBoost + Isolation Forest + SHAP</footer>
+<script src="/static/app.js"></script>
+</body></html>
