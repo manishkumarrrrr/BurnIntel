@@ -41,6 +41,14 @@ FAILURE_THRESHOLD = 0.50
 ANOMALY_WARNING_THRESHOLD = 0.70
 ANOMALY_REJECT_THRESHOLD = 0.85
 
+# Render Free instances have limited RAM/CPU and a request timeout.
+# Keep the models lightweight enough for a 60,000-row SIH dataset.
+XGB_N_ESTIMATORS = int(os.environ.get("XGB_N_ESTIMATORS", "180"))
+XGB_MAX_DEPTH = int(os.environ.get("XGB_MAX_DEPTH", "3"))
+XGB_N_JOBS = int(os.environ.get("XGB_N_JOBS", "1"))
+IF_N_ESTIMATORS = int(os.environ.get("IF_N_ESTIMATORS", "100"))
+IF_SAMPLE_SIZE = int(os.environ.get("IF_SAMPLE_SIZE", "20000"))
+
 DATASET = None
 DATASET_NAME = None
 MODEL_PACKAGE = None
@@ -181,12 +189,12 @@ def numeric_matrix(df, features):
 
 def build_classifier(scale_pos_weight):
     return XGBClassifier(
-        n_estimators=700, max_depth=4, learning_rate=0.03,
-        subsample=0.90, colsample_bytree=0.90, min_child_weight=4,
-        gamma=0.05, reg_alpha=0.05, reg_lambda=3.0,
+        n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
+        learning_rate=0.05, subsample=0.90, colsample_bytree=0.90,
+        min_child_weight=4, gamma=0.05, reg_alpha=0.05, reg_lambda=3.0,
         objective="binary:logistic", eval_metric="logloss",
         scale_pos_weight=scale_pos_weight, random_state=RANDOM_STATE,
-        n_jobs=-1, tree_method="hist"
+        n_jobs=XGB_N_JOBS, tree_method="hist"
     )
 
 
@@ -269,13 +277,19 @@ def normalize_anomaly_scores(raw_scores, low=None, high=None):
 
 
 def train_isolation_forest(df, features):
-    X, _ = train_test_split(df, test_size=HOLDOUT_SIZE, stratify=df["target"], random_state=RANDOM_STATE)
+    # Isolation Forest does not need all 60k rows. A deterministic sample
+    # greatly reduces RAM/time on the Render Free instance.
+    sample_n = min(IF_SAMPLE_SIZE, len(df))
+    if sample_n < len(df):
+        X = df.sample(n=sample_n, random_state=RANDOM_STATE)
+    else:
+        X = df
     X = numeric_matrix(X, features)
     imputer = SimpleImputer(strategy="median")
     X_i = imputer.fit_transform(X)
     model = IsolationForest(
-        n_estimators=350, contamination="auto", max_samples="auto",
-        random_state=RANDOM_STATE, n_jobs=-1
+        n_estimators=IF_N_ESTIMATORS, contamination="auto",
+        max_samples="auto", random_state=RANDOM_STATE, n_jobs=1
     )
     model.fit(X_i)
     raw = model.score_samples(X_i)
@@ -308,11 +322,11 @@ def train_drift_model(df, features):
     X_train_i = imputer.fit_transform(X_train)
     X_test_i = imputer.transform(X_test)
     model = XGBRegressor(
-        n_estimators=600, max_depth=4, learning_rate=0.03,
-        subsample=0.90, colsample_bytree=0.90, min_child_weight=4,
-        gamma=0.05, reg_alpha=0.05, reg_lambda=3.0,
+        n_estimators=XGB_N_ESTIMATORS, max_depth=XGB_MAX_DEPTH,
+        learning_rate=0.05, subsample=0.90, colsample_bytree=0.90,
+        min_child_weight=4, gamma=0.05, reg_alpha=0.05, reg_lambda=3.0,
         objective="reg:squarederror", eval_metric="mae",
-        random_state=RANDOM_STATE, n_jobs=-1, tree_method="hist"
+        random_state=RANDOM_STATE, n_jobs=XGB_N_JOBS, tree_method="hist"
     )
     model.fit(X_train_i, y_train, eval_set=[(X_test_i, y_test)], verbose=False)
     train_pred = model.predict(X_train_i)
@@ -341,9 +355,17 @@ def train_all(df):
         raise ValueError("Column 'component_id' was not found.")
     failure_features = available_features(df, FAILURE_FEATURES)
     drift_features = available_features(df, DRIFT_FEATURES)
+
+    app.logger.info("Training failure classifier on %d rows...", len(df))
     failure = train_failure_model(df, failure_features)
+
+    app.logger.info("Training anomaly detector...")
     anomaly = train_isolation_forest(df, failure_features)
+
+    app.logger.info("Training VDD drift regressor...")
     drift = train_drift_model(df, drift_features)
+
+    app.logger.info("All models trained successfully.")
     package = {
         "failure_model": failure, "anomaly_model": anomaly, "drift_model": drift,
         "version": "SIH-ESS-ML-2.0-FINAL", "random_state": RANDOM_STATE,
