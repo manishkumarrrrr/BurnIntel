@@ -29,6 +29,12 @@ MODEL_DIR = os.path.join(BASE_DIR, "saved_models")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# Persistent state files. Do not rely on in-memory globals because hosted
+# Gunicorn/Flask processes can restart between requests.
+DATASET_STATE_PATH = os.path.join(UPLOAD_DIR, "current_training_dataset.pkl")
+TEST_DATASET_STATE_PATH = os.path.join(UPLOAD_DIR, "current_test_dataset.pkl")
+MODEL_STATE_PATH = os.path.join(MODEL_DIR, "sih_ess_complete_model.joblib")
+
 RANDOM_STATE = 42
 HOLDOUT_SIZE = 0.20
 FAILURE_THRESHOLD = 0.50
@@ -42,6 +48,78 @@ LAST_PREDICTIONS = None
 TEST_DATASET = None
 TEST_DATASET_NAME = None
 LAST_TEST_PREDICTIONS = None
+
+def save_training_dataset(df, name):
+    df.to_pickle(DATASET_STATE_PATH)
+    meta_path = os.path.join(UPLOAD_DIR, "current_training_dataset_name.txt")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        f.write(name or "")
+
+
+def load_training_dataset():
+    global DATASET, DATASET_NAME
+    if DATASET is not None:
+        return DATASET
+    if not os.path.exists(DATASET_STATE_PATH):
+        return None
+    try:
+        DATASET = pd.read_pickle(DATASET_STATE_PATH)
+        meta_path = os.path.join(UPLOAD_DIR, "current_training_dataset_name.txt")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                DATASET_NAME = f.read().strip() or None
+        return DATASET
+    except Exception:
+        DATASET = None
+        DATASET_NAME = None
+        return None
+
+
+def save_test_dataset(df, name):
+    df.to_pickle(TEST_DATASET_STATE_PATH)
+    meta_path = os.path.join(UPLOAD_DIR, "current_test_dataset_name.txt")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        f.write(name or "")
+
+
+def load_test_dataset():
+    global TEST_DATASET, TEST_DATASET_NAME
+    if TEST_DATASET is not None:
+        return TEST_DATASET
+    if not os.path.exists(TEST_DATASET_STATE_PATH):
+        return None
+    try:
+        TEST_DATASET = pd.read_pickle(TEST_DATASET_STATE_PATH)
+        meta_path = os.path.join(UPLOAD_DIR, "current_test_dataset_name.txt")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                TEST_DATASET_NAME = f.read().strip() or None
+        return TEST_DATASET
+    except Exception:
+        TEST_DATASET = None
+        TEST_DATASET_NAME = None
+        return None
+
+
+def load_model_package():
+    global MODEL_PACKAGE
+    if MODEL_PACKAGE is not None:
+        return MODEL_PACKAGE
+    if not os.path.exists(MODEL_STATE_PATH):
+        return None
+    try:
+        MODEL_PACKAGE = joblib.load(MODEL_STATE_PATH)
+        return MODEL_PACKAGE
+    except Exception:
+        MODEL_PACKAGE = None
+        return None
+
+
+def restore_persistent_state():
+    load_training_dataset()
+    load_test_dataset()
+    load_model_package()
+
 
 FAILURE_FEATURES = [
     "burn_in_temperature_c", "burn_in_duration_hr", "thermal_acceleration_factor",
@@ -271,7 +349,7 @@ def train_all(df):
         "version": "SIH-ESS-ML-2.0-FINAL", "random_state": RANDOM_STATE,
         "holdout_fraction": HOLDOUT_SIZE, "dataset_name": DATASET_NAME
     }
-    joblib.dump(package, os.path.join(MODEL_DIR, "sih_ess_complete_model.joblib"))
+    joblib.dump(package, MODEL_STATE_PATH)
     return package, df
 
 
@@ -386,12 +464,15 @@ def index():
 
 @app.route("/api/status")
 def api_status():
+    dataset = load_training_dataset()
+    test_dataset = load_test_dataset()
+    package = load_model_package()
     return jsonify(clean_json_value({
-        "trained": MODEL_PACKAGE is not None,
+        "trained": package is not None,
         "dataset": DATASET_NAME,
-        "rows": int(len(DATASET)) if DATASET is not None else 0,
+        "rows": int(len(dataset)) if dataset is not None else 0,
         "test_dataset": TEST_DATASET_NAME,
-        "test_rows": int(len(TEST_DATASET)) if TEST_DATASET is not None else 0,
+        "test_rows": int(len(test_dataset)) if test_dataset is not None else 0,
         "shap_available": SHAP_AVAILABLE
     }))
 
@@ -411,6 +492,7 @@ def upload():
             raise ValueError("Dataset must contain component_id.")
         df = prepare_target(df)
         DATASET, DATASET_NAME = df, filename
+        save_training_dataset(DATASET, DATASET_NAME)
         return jsonify(clean_json_value({
             "message": "Training dataset loaded.", "filename": filename,
             "rows": len(df), "columns": list(df.columns),
@@ -423,11 +505,13 @@ def upload():
 @app.route("/api/train", methods=["POST"])
 def train():
     global MODEL_PACKAGE, DATASET, LAST_PREDICTIONS
-    if DATASET is None:
+    dataset = load_training_dataset()
+    if dataset is None:
         return jsonify({"error": "Upload a training dataset first."}), 400
     try:
-        package, DATASET = train_all(DATASET)
+        package, DATASET = train_all(dataset)
         MODEL_PACKAGE = package
+        joblib.dump(MODEL_PACKAGE, MODEL_STATE_PATH)
         LAST_PREDICTIONS = None
         return jsonify(clean_json_value({
             "message": "Final model trained and saved.",
@@ -447,25 +531,30 @@ def train():
 
 @app.route("/api/components")
 def components():
-    return jsonify({"components": DATASET["component_id"].astype(str).tolist() if DATASET is not None else []})
+    dataset = load_training_dataset()
+    return jsonify({"components": dataset["component_id"].astype(str).tolist() if dataset is not None else []})
 
 
 @app.route("/api/predict/<component_id>")
 def predict(component_id):
-    if MODEL_PACKAGE is None or DATASET is None:
+    package = load_model_package()
+    dataset = load_training_dataset()
+    if package is None or dataset is None:
         return jsonify({"error": "Train the model first."}), 400
-    rows = DATASET[DATASET["component_id"].astype(str) == str(component_id)]
+    rows = dataset[dataset["component_id"].astype(str) == str(component_id)]
     if rows.empty:
         return jsonify({"error": "Component not found."}), 404
-    return jsonify(clean_json_value(predict_row(rows.iloc[0], MODEL_PACKAGE, True, True)))
+    return jsonify(clean_json_value(predict_row(rows.iloc[0], package, True, True)))
 
 
 @app.route("/api/predict-all", methods=["POST"])
 def predict_all():
     global LAST_PREDICTIONS
-    if MODEL_PACKAGE is None or DATASET is None:
+    package = load_model_package()
+    dataset = load_training_dataset()
+    if package is None or dataset is None:
         return jsonify({"error": "Train the model first."}), 400
-    LAST_PREDICTIONS = batch_test_predict(DATASET, MODEL_PACKAGE)
+    LAST_PREDICTIONS = batch_test_predict(dataset, package)
     path = os.path.join(UPLOAD_DIR, "sih_component_predictions.csv")
     LAST_PREDICTIONS.to_csv(path, index=False)
     return jsonify(clean_json_value({
@@ -485,7 +574,7 @@ def download_predictions():
 @app.route("/api/test-upload", methods=["POST"])
 def test_upload():
     global TEST_DATASET, TEST_DATASET_NAME, LAST_TEST_PREDICTIONS
-    if MODEL_PACKAGE is None:
+    if load_model_package() is None:
         return jsonify({"error": "Train the final model before uploading custom test data."}), 400
     if "file" not in request.files or not request.files["file"].filename:
         return jsonify({"error": "Select a custom test dataset first."}), 400
@@ -498,6 +587,7 @@ def test_upload():
         if "component_id" not in df.columns:
             raise ValueError("Test dataset must contain component_id.")
         TEST_DATASET, TEST_DATASET_NAME, LAST_TEST_PREDICTIONS = df, filename, None
+        save_test_dataset(TEST_DATASET, TEST_DATASET_NAME)
         return jsonify(clean_json_value({
             "message": "Custom test dataset loaded.", "filename": filename,
             "rows": len(df), "columns": list(df.columns),
@@ -509,24 +599,27 @@ def test_upload():
 
 @app.route("/api/test-components")
 def test_components():
-    return jsonify({"components": TEST_DATASET["component_id"].astype(str).tolist() if TEST_DATASET is not None else []})
+    dataset = load_test_dataset()
+    return jsonify({"components": dataset["component_id"].astype(str).tolist() if dataset is not None else []})
 
 
 @app.route("/api/test-evaluate", methods=["POST"])
 def test_evaluate():
     global LAST_TEST_PREDICTIONS
-    if MODEL_PACKAGE is None:
+    package = load_model_package()
+    test_dataset = load_test_dataset()
+    if package is None:
         return jsonify({"error": "Train the final model first."}), 400
-    if TEST_DATASET is None:
+    if test_dataset is None:
         return jsonify({"error": "Upload a custom test dataset first."}), 400
     try:
         # Vectorized inference: no per-row SHAP, no huge JSON payload, and no NaN JSON failure.
-        LAST_TEST_PREDICTIONS = batch_test_predict(TEST_DATASET, MODEL_PACKAGE)
-        y = TEST_DATASET["target"].astype(int).to_numpy()
+        LAST_TEST_PREDICTIONS = batch_test_predict(test_dataset, package)
+        y = test_dataset["target"].astype(int).to_numpy()
         p = LAST_TEST_PREDICTIONS["failure_probability"].to_numpy()
-        c = classification_metrics(y, p, MODEL_PACKAGE["failure_model"]["threshold"])
+        c = classification_metrics(y, p, package["failure_model"]["threshold"])
 
-        actual_drift = pd.to_numeric(TEST_DATASET["measured_vdd_v_final"], errors="coerce") - pd.to_numeric(TEST_DATASET["measured_vdd_v_initial"], errors="coerce")
+        actual_drift = pd.to_numeric(test_dataset["measured_vdd_v_final"], errors="coerce") - pd.to_numeric(test_dataset["measured_vdd_v_initial"], errors="coerce")
         pred_drift = LAST_TEST_PREDICTIONS["predicted_vdd_drift_168h"].to_numpy()
         valid = actual_drift.notna().to_numpy() & np.isfinite(pred_drift)
         drift_metrics = None
@@ -554,12 +647,14 @@ def test_evaluate():
 
 @app.route("/api/test-predict/<component_id>")
 def test_predict(component_id):
-    if MODEL_PACKAGE is None or TEST_DATASET is None:
+    package = load_model_package()
+    test_dataset = load_test_dataset()
+    if package is None or test_dataset is None:
         return jsonify({"error": "Train the model and upload custom test data first."}), 400
-    rows = TEST_DATASET[TEST_DATASET["component_id"].astype(str) == str(component_id)]
+    rows = test_dataset[test_dataset["component_id"].astype(str) == str(component_id)]
     if rows.empty:
         return jsonify({"error": "Test component not found."}), 404
-    result = predict_row(rows.iloc[0], MODEL_PACKAGE, True, True)
+    result = predict_row(rows.iloc[0], package, True, True)
     row = rows.iloc[0]
     initial = pd.to_numeric(pd.Series([row.get("measured_vdd_v_initial")]), errors="coerce").iloc[0]
     final = pd.to_numeric(pd.Series([row.get("measured_vdd_v_final")]), errors="coerce").iloc[0]
@@ -577,6 +672,10 @@ def download_test_predictions():
         return jsonify({"error": "Evaluate the custom test set first."}), 400
     return send_file(path, as_attachment=True, download_name="sih_ess_custom_test_predictions.csv")
 
+
+# Restore any state that was persisted by an earlier request.
+# This runs when a Gunicorn worker starts/restarts.
+restore_persistent_state()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
